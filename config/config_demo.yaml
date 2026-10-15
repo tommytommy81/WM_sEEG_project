@@ -1,0 +1,17 @@
+# Demo configuration for the synthetic dataset (scripts/make_demo_data.py).
+# Inherits everything from config.yaml and overrides only what differs.
+extends: config.yaml
+
+paths:
+  raw_root: demo_data/raw
+  derivatives_root: demo_data/derivatives
+  regions_file: demo_data/regions_demo.yaml
+  raw_fname: "{raw_root}/sub-{subject}_task-wm_ieeg.edf"
+
+subjects: ["01", "02", "03", "04", "05", "06"]
+
+stats:
+  per_frequency:
+    n_permutations: 1000
+  per_region:
+    min_subjects: 3

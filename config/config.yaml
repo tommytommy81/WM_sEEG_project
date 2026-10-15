@@ -1,0 +1,250 @@
+# =============================================================================
+# WM_sEEG – pipeline configuration
+# =============================================================================
+# Every tunable parameter of the preprocessing and spectral/statistics notebooks
+# lives here. Relative paths are resolved against the repository root (the
+# parent directory of this `config/` folder).
+#
+# Tip: keep machine-specific values (e.g. `paths.raw_root`) in
+# `config/config.local.yaml` (git-ignored). It is deep-merged on top of this
+# file automatically. A config can also inherit from another one with
+# `extends: <other.yaml>` (see config/config_demo.yaml).
+# =============================================================================
+
+project:
+  name: WM_sEEG
+  task: working_memory
+  random_seed: 42
+  n_jobs: 1                 # parallel jobs for MNE filtering / PSD (-1 = all cores)
+  log_level: INFO
+
+# -----------------------------------------------------------------------------
+# Paths. Templates may use {raw_root}, {derivatives_root} and {subject}.
+# -----------------------------------------------------------------------------
+paths:
+  raw_root: /path/to/iEEG_data                   # <- EDIT (or set in config.local.yaml)
+  derivatives_root: derivatives                  # outputs (epochs, spectra, stats, figures)
+  regions_file: config/regions.yaml              # subject -> region -> contacts
+  raw_fname: "{raw_root}/{subject}_upd2.edf"     # raw recording per subject
+  events_fname: null                             # only for events.source == file (.eve / .csv)
+  annotations_fname: null                        # optional pre-existing annotations (.csv/.txt/.fif)
+
+subjects: ["5", "6", "10"]   # IDs substituted into {subject}; must match keys in regions_file
+
+# -----------------------------------------------------------------------------
+# Raw data loading
+# -----------------------------------------------------------------------------
+data:
+  reader: auto                  # auto | edf | fif | brainvision | edf+ (auto = by extension)
+  default_channel_type: seeg    # type assigned to all data channels
+  channel_types: {}             # explicit overrides, e.g. {ECG1: ecg, "EKG+": ecg}
+  # Regexes applied (in order, re.sub -> "") to clean channel names, e.g. "EEG HC'3-Ref" -> "HC'3"
+  name_strip_patterns: ["^EEG\\s+", "^POL\\s+", "-Ref$", "-REF$", "\\s+"]
+  # Channels whose (cleaned) name matches one of these regexes are dropped
+  drop_channels_regex: ["^DC\\d*$", "^E[CK]G", "^EMG", "^EOG", "^Event", "^TRIG", "^Status", "^STI", "^Annotations"]
+  # Only keep contacts whose name parses as <shaft><number> (e.g. HC'3, OR10, PFG'1)
+  keep_only_parsable_contacts: true
+  resample_sfreq: 512           # Hz; null keeps the original sampling rate
+
+# -----------------------------------------------------------------------------
+# Events / trial definition
+# -----------------------------------------------------------------------------
+events:
+  source: annotations       # annotations | stim | file
+  stim_channel: null        # for source == stim (e.g. "TRIG"); null = MNE auto-detection
+  min_duration: 0.002       # for source == stim
+  shortest_event: 1
+  # Map raw annotation descriptions (source == annotations) to integer codes.
+  # null -> use mne.events_from_annotations defaults (all descriptions).
+  annotation_map: null
+  # Hierarchical event dictionary ("/"-separated tags let you select e.g. all
+  # "maintenance" epochs or only "maintenance/load4").
+  event_id:
+    fixation: 1
+    encoding/load2: 12
+    encoding/load4: 14
+    maintenance/load2: 22
+    maintenance/load4: 24
+    probe/load2: 32
+    probe/load4: 34
+  # Optional behavioural table merged as epochs.metadata (one row per *kept* event, in order)
+  metadata_fname: null              # e.g. "{raw_root}/{subject}_behaviour.csv"
+  metadata_query: null              # e.g. "correct == 1" to keep correct trials only
+
+# -----------------------------------------------------------------------------
+# Filtering
+# -----------------------------------------------------------------------------
+filtering:
+  l_freq: 0.5               # high-pass (Hz); null to skip
+  h_freq: 200               # low-pass (Hz); null to skip (must be < sfreq/2)
+  notch:
+    freqs: [50, 100, 150, 200]   # line noise + harmonics (use 60, 120, ... in the Americas)
+    method: fir             # fir | spectrum_fit
+    notch_widths: null
+
+# -----------------------------------------------------------------------------
+# Bad channels (detected on the monopolar recording, before re-referencing)
+# -----------------------------------------------------------------------------
+bad_channels:
+  manual: {}                # per-subject list, e.g. {"5": ["HC'1", "OR'10"]}
+  use_saved: true           # re-use bads saved in derivatives from a previous session
+  auto:
+    enabled: true
+    flat_std_uv: 0.5        # robust (MAD) std below this (µV) -> flat
+    variance_z: 5.0         # robust z-score of log robust-variance above this -> noisy
+    line_noise_z: 5.0       # robust z of (line-noise power / total power) above this
+    hf_noise_z: 10.0        # robust z of log HF power (conservative: task-related high gamma can be large)
+    hf_band: [100, 200]     # Hz, clipped to Nyquist
+    neighbor_corr_min: 0.15 # median |corr| with adjacent contacts on the same shaft below this
+    crop_seconds: 300       # analyse only the first N s for speed (null = everything)
+
+# -----------------------------------------------------------------------------
+# Re-referencing
+# -----------------------------------------------------------------------------
+rereference:
+  method: bipolar           # bipolar | laplacian | shaft_car | car | none
+  bipolar:
+    max_gap: 1              # 1 = adjacent contacts only; 2 also allows skipping one bad contact
+    drop_monopolar: true
+  # channel name of the bipolar derivation, {anode}/{cathode} substituted
+  bipolar_name_template: "{anode}-{cathode}"
+
+# -----------------------------------------------------------------------------
+# Bad temporal intervals (detected on the re-referenced signal)
+# -----------------------------------------------------------------------------
+bad_segments:
+  use_saved: true           # re-use annotations saved in derivatives from a previous session
+  auto:
+    enabled: true
+    description: BAD_auto
+    amplitude_z: 8.0        # robust z of |signal| (per channel)
+    gradient_z: 8.0         # robust z of |first derivative| (sharp transients / IEDs)
+    hf_envelope:
+      enabled: true
+      band: [20, 80]        # Hz – spike/IED band
+      z: 6.0                # robust z of the band-limited envelope
+    min_channels: 1         # a time point is bad if >= N channels exceed a threshold
+    pad: 0.25               # s added before/after each detected segment
+    merge_gap: 0.5          # s; merge segments closer than this
+    min_duration: 0.05      # s; discard shorter detections
+
+# -----------------------------------------------------------------------------
+# Epoching
+# -----------------------------------------------------------------------------
+epochs:
+  mode: event               # event: one epoch per event | block: split long events into fixed windows
+  tmin: -0.5                # s (event mode)
+  tmax: 2.0                 # s (event mode)
+  baseline: null            # e.g. [-0.5, 0]; keep null for spectral analysis
+  block:                    # block mode (legacy emotion-regulation design: 60 s movies -> 2 s epochs)
+    duration: 60.0
+    epoch_length: 2.0
+    overlap: 0.0
+  reject_by_annotation: true    # drop epochs overlapping BAD_* annotations
+  reject_peak_to_peak: null     # e.g. {seeg: 0.002} (V)
+  flat: null
+  decim: 1
+  # Conditions kept in the saved epochs (event_id tags). null = all
+  keep_conditions: null
+
+# -----------------------------------------------------------------------------
+# Spectral analysis
+# -----------------------------------------------------------------------------
+spectral:
+  method: multitaper        # multitaper | welch
+  fmin: 1.0
+  fmax: 150.0
+  # Analysis window inside each epoch (s). Must not overlap the next trial phase
+  # (e.g. fixation 0-1 s is followed by encoding at 1 s in a Sternberg trial).
+  tmin: 0.0
+  tmax: 1.0
+  # Per-condition override, e.g. {fixation: [-0.5, 0.5]}. All windows must have the
+  # SAME length so that every condition shares the same frequency grid.
+  window_per_condition: {}
+  multitaper:
+    bandwidth: 4.0          # Hz (full bandwidth)
+    adaptive: false
+    low_bias: true
+  welch:
+    n_fft: null             # null -> n_per_seg
+    n_per_seg: 512          # samples
+    n_overlap: 256
+    average: mean
+  # how per-epoch PSDs are summarised across epochs of a condition
+  epoch_average: mean       # mean | median
+  transform: log10          # log10 | db | relative | none
+  relative_range: [1, 150]  # Hz, denominator for `relative`
+  aperiodic_correction: false   # subtract 1/f fit in log-log space (requires transform log10/db)
+  aperiodic_fit_range: [2, 40]  # Hz – fit range of the 1/f line (avoid line noise)
+  exclude_line_noise: [50, 100, 150]  # Hz; bins within ±line_noise_width are set to NaN
+  line_noise_width: 2.0
+  bands:
+    delta: [1, 4]
+    theta: [4, 8]
+    alpha: [8, 13]
+    beta: [13, 30]
+    low_gamma: [30, 70]
+    high_gamma: [70, 150]
+  # Conditions = name -> epochs selector (event_id tag(s)). One PSD per condition.
+  conditions:
+    fixation: fixation
+    encoding: encoding
+    maintenance: maintenance
+    probe: probe
+    maintenance_load2: maintenance/load2
+    maintenance_load4: maintenance/load4
+
+# -----------------------------------------------------------------------------
+# Group statistics
+# -----------------------------------------------------------------------------
+stats:
+  alpha: 0.05
+  # Paired contrasts (a - b). Names refer to spectral.conditions keys.
+  contrasts:
+    - {name: maintenance_vs_fixation, a: maintenance, b: fixation}
+    - {name: encoding_vs_fixation, a: encoding, b: fixation}
+    - {name: load4_vs_load2, a: maintenance_load4, b: maintenance_load2}
+  # Repeated-measures omnibus across >2 conditions (Friedman test, per band)
+  omnibus:
+    enabled: true
+    conditions: [fixation, encoding, maintenance, probe]
+  # Observational unit for the across-subject tests: channels are averaged within subject
+  min_channels_per_subject: 1
+  per_frequency:
+    enabled: true
+    method: cluster         # cluster (1D cluster-based permutation) | fdr (paired t per bin + FDR)
+    n_permutations: 5000
+    cluster_threshold: null # t-threshold; null -> from stats.alpha (two-tailed)
+    tail: 0                 # 0 two-sided, 1 a>b, -1 a<b
+  per_band:
+    enabled: true
+    test: ttest             # ttest | wilcoxon
+    correction: fdr_bh      # fdr_bh | bonferroni | holm | none (over bands x contrasts [x regions])
+  # Channel-level linear mixed model: power ~ condition + (1|subject) + (1|subject:channel)
+  mixed_model:
+    enabled: true
+  per_region:
+    enabled: true
+    min_subjects: 3         # skip regions covered by fewer subjects
+    merge_hemispheres: false # "Left Hippocampus" + "Right Hippocampus" -> "Hippocampus"
+    regions: null           # restrict to a list of regions; null = all
+    unassigned_label: Unassigned  # channels absent from regions_file
+    drop_unassigned: true
+
+# -----------------------------------------------------------------------------
+# Plotting
+# -----------------------------------------------------------------------------
+plotting:
+  dpi: 150
+  save_format: png
+  raw_browser:
+    duration: 20.0          # s shown per page in raw.plot
+    n_channels: 30
+    scalings: {seeg: 0.0002}  # V
+  condition_colors:
+    fixation: "#4d4d4d"
+    encoding: "#e69f00"
+    maintenance: "#0072b2"
+    probe: "#009e73"
+    maintenance_load2: "#56b4e9"
+    maintenance_load4: "#d55e00"

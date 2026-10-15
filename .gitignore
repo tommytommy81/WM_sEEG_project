@@ -1,0 +1,22 @@
+# data & outputs (never commit patient data)
+derivatives/
+demo_data/
+*.edf
+*.EDF
+*.fif
+*.fif.gz
+*.vhdr
+*.eeg
+*.vmrk
+
+# machine-specific config
+config/config.local.yaml
+
+# python / jupyter
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+.env
+.DS_Store
