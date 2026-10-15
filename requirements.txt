@@ -1,0 +1,21 @@
+# Core
+mne>=1.6
+numpy>=1.24
+scipy>=1.10
+pandas>=2.0
+matplotlib>=3.7
+pyyaml>=6.0
+statsmodels>=0.14      # mixed models + multiple-comparison correction
+
+# File formats
+edfio>=0.4             # EDF export (scripts/make_demo_data.py) and MNE EDF support
+openpyxl>=3.1          # optional: Excel behavioural tables
+
+# Interactive data browsing in notebooks (raw.plot with a Qt backend)
+mne-qt-browser>=0.6
+PyQt6>=6.5
+
+# Notebooks
+jupyterlab>=4.0
+ipykernel>=6.25
+nbclient>=0.8          # headless execution of notebooks (testing)
