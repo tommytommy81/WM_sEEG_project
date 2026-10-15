@@ -67,12 +67,102 @@ def read_events_file(fname: Path, sfreq: float, first_samp: int,
     return np.c_[samples, np.zeros_like(samples), codes]
 
 
+def detect_threshold_triggers(raw: mne.io.BaseRaw, channel: str, level_uv: float,
+                              direction: str, merge_window: float,
+                              tmin: float | None = None, tmax: float | None = None
+                              ) -> pd.DataFrame:
+    """Detect trigger pulses as threshold crossings on an analog marker channel.
+
+    Designed for marker lines such as ``MKR2+``: a ±50 µV square wave on which
+    triggers appear as brief excursions beyond the square-wave levels (e.g. to
+    -100 µV). Every sample beyond ``level_uv`` (in the given ``direction``) is a
+    pulse sample; consecutive samples form a pulse, and pulses closer than
+    ``merge_window`` seconds are merged into a single trigger whose onset is the
+    first pulse.
+
+    Returns one row per trigger: ``sample`` (absolute, includes ``first_samp``),
+    ``onset`` (s from the start of the recording), ``n_pulses``, ``duration_ms``
+    (first to last pulse sample), ``peak_uv`` (most extreme value).
+
+    All detection parameters come from ``events.threshold`` in the YAML config;
+    use :func:`triggers_from_config` to call this with those values.
+    """
+    if channel not in raw.ch_names:
+        raise ValueError(f"Trigger channel {channel!r} not found. Channels: {raw.ch_names}")
+    x = raw.get_data(picks=[channel], tmin=tmin, tmax=tmax)[0] * 1e6
+    sfreq = raw.info["sfreq"]
+    offset = int(round((tmin or 0.0) * sfreq))
+    if direction == "below":
+        hit = x < level_uv
+    elif direction == "above":
+        hit = x > level_uv
+    else:
+        raise ValueError(f"direction must be 'below' or 'above', got {direction!r}")
+    d = np.diff(np.r_[0, hit.astype(np.int8), 0])
+    starts, stops = np.where(d == 1)[0], np.where(d == -1)[0]
+    cols = ["sample", "onset", "n_pulses", "duration_ms", "peak_uv"]
+    if len(starts) == 0:
+        return pd.DataFrame(columns=cols)
+    gap = int(round(merge_window * sfreq))
+    groups, cur = [], [0]
+    for i in range(1, len(starts)):
+        if starts[i] - starts[cur[0]] <= gap:
+            cur.append(i)
+        else:
+            groups.append(cur)
+            cur = [i]
+    groups.append(cur)
+    rows = []
+    for g in groups:
+        s0, s1 = starts[g[0]], stops[g[-1]]
+        seg = x[s0:s1]
+        rows.append({"sample": raw.first_samp + offset + s0,
+                     "onset": (offset + s0) / sfreq,
+                     "n_pulses": len(g),
+                     "duration_ms": 1000 * (s1 - s0) / sfreq,
+                     "peak_uv": seg.min() if direction == "below" else seg.max()})
+    return pd.DataFrame(rows, columns=cols)
+
+
+THRESHOLD_KEYS = ("channel", "level_uv", "direction", "merge_window")
+
+
+def threshold_config(cfg: Config) -> dict:
+    """``events.threshold`` from the YAML, checking that every detection key is set."""
+    tcfg = (cfg["events"].get("threshold") or {})
+    missing = [k for k in THRESHOLD_KEYS if tcfg.get(k) is None]
+    if missing:
+        raise KeyError(f"events.threshold is missing {missing} in {cfg.path}")
+    return tcfg
+
+
+def triggers_from_config(raw: mne.io.BaseRaw, cfg: Config, tmin: float | None = None,
+                         tmax: float | None = None) -> pd.DataFrame:
+    """Run :func:`detect_threshold_triggers` with the parameters of ``events.threshold``."""
+    tcfg = threshold_config(cfg)
+    return detect_threshold_triggers(raw, tcfg["channel"], float(tcfg["level_uv"]),
+                                     tcfg["direction"], float(tcfg["merge_window"]),
+                                     tmin=tmin, tmax=tmax)
+
+
 def find_events(raw: mne.io.BaseRaw, cfg: Config, subject: str
                 ) -> tuple[np.ndarray, dict[str, int]]:
     """Return ``(events, event_id)`` restricted to codes declared in the config."""
     ecfg = cfg["events"]
     event_id: dict[str, int] = dict(ecfg["event_id"])
     source = ecfg["source"]
+    if source == "threshold":
+        tcfg = threshold_config(cfg)
+        trig = triggers_from_config(raw, cfg)
+        code = int(tcfg.get("code", 1))
+        events = np.c_[trig["sample"].to_numpy(int), np.zeros(len(trig), int),
+                       np.full(len(trig), code)]
+        # triggers carry no condition code: label them all with one name until
+        # they are matched to the behavioural log
+        event_id = {tcfg.get("event_name", "trigger"): code}
+        log.info("Detected %d triggers on %s (threshold %s µV, merge_window %s s)",
+                 len(events), tcfg["channel"], tcfg["level_uv"], tcfg["merge_window"])
+        return events, event_id
     if source == "annotations":
         mapping = ecfg.get("annotation_map")
         if mapping is None:
@@ -143,9 +233,23 @@ def save_bad_segments(cfg: Config, subject: str, raw: mne.io.BaseRaw) -> Path:
     return path
 
 
-def load_saved_bad_segments(cfg: Config, subject: str) -> mne.Annotations | None:
+def load_saved_bad_segments(cfg: Config, subject: str, orig_time=None
+                            ) -> mne.Annotations | None:
+    """Read saved BAD_* annotations, re-expressed relative to ``orig_time``.
+
+    MNE reads a CSV with absolute timestamps back with ``orig_time`` set to the
+    first onset, which cannot be added to the recording's annotations. Pass
+    ``raw.annotations.orig_time`` so the onsets are shifted onto the same
+    reference time.
+    """
     path = bad_segments_fname(cfg, subject)
     if not path.exists():
         return None
     annot = mne.read_annotations(path)
-    return annot if len(annot) else None
+    if not len(annot):
+        return None
+    if orig_time is not None and annot.orig_time is not None and annot.orig_time != orig_time:
+        shift = (annot.orig_time - orig_time).total_seconds()
+        annot = mne.Annotations(annot.onset + shift, annot.duration, annot.description,
+                                orig_time=orig_time)
+    return annot

@@ -22,14 +22,14 @@ project:
 # Paths. Templates may use {raw_root}, {derivatives_root} and {subject}.
 # -----------------------------------------------------------------------------
 paths:
-  raw_root: /path/to/iEEG_data                   # <- EDIT (or set in config.local.yaml)
+  raw_root: '/Users/administrator/__PC_HSE/Results/Nikita Otstavnov/Nikita sEEG/2007'                  # <- EDIT (or set in config.local.yaml)
   derivatives_root: derivatives                  # outputs (epochs, spectra, stats, figures)
   regions_file: config/regions.yaml              # subject -> region -> contacts
-  raw_fname: "{raw_root}/{subject}_upd2.edf"     # raw recording per subject
+  raw_fname: "{raw_root}/{subject}90626.edf"     # raw recording per subject
   events_fname: null                             # only for events.source == file (.eve / .csv)
   annotations_fname: null                        # optional pre-existing annotations (.csv/.txt/.fif)
 
-subjects: ["5", "6", "10"]   # IDs substituted into {subject}; must match keys in regions_file
+subjects: ["1"]   # IDs substituted into {subject}; must match keys in regions_file
 
 # -----------------------------------------------------------------------------
 # Raw data loading
@@ -41,7 +41,8 @@ data:
   # Regexes applied (in order, re.sub -> "") to clean channel names, e.g. "EEG HC'3-Ref" -> "HC'3"
   name_strip_patterns: ["^EEG\\s+", "^POL\\s+", "-Ref$", "-REF$", "\\s+"]
   # Channels whose (cleaned) name matches one of these regexes are dropped
-  drop_channels_regex: ["^DC\\d*$", "^E[CK]G", "^EMG", "^EOG", "^Event", "^TRIG", "^Status", "^STI", "^Annotations"]
+  # (scalp EEG/ECG arrive as "EEG EEG-Fp1", "EEG EEG ECG1" -> cleaned to "EEG-Fp1", "EEGECG1")
+  drop_channels_regex: ["^DC\\d*$", "^E[CK]G", "^EEG", "^MKR", "^EMG", "^EOG", "^Event", "^TRIG", "^Status", "^STI", "^Annotations"]
   # Only keep contacts whose name parses as <shaft><number> (e.g. HC'3, OR10, PFG'1)
   keep_only_parsable_contacts: true
   resample_sfreq: 512           # Hz; null keeps the original sampling rate
@@ -50,7 +51,20 @@ data:
 # Events / trial definition
 # -----------------------------------------------------------------------------
 events:
-  source: annotations       # annotations | stim | file
+  source: threshold         # threshold | annotations | stim | file
+  # source == threshold: triggers are excursions on an analog marker channel.
+  # MKR2+ is a ±50 µV square wave; triggers dip below -50 µV (to about -100 µV).
+  threshold:
+    channel: "MKR2+"
+    level_uv: -75.0         # halfway between the square-wave low (-50) and the trigger (-100)
+    direction: below        # below | above
+    # Seconds after a trigger's first pulse within which any further pulses/triggers
+    # are merged into it (onset = first pulse). 0.05 keeps every trigger (merges only
+    # the ~17 ms double dip); 3.7 also removes the follower trigger ~3.57 s later
+    # (= 1830 samples at 512 Hz).
+    merge_window: 3.7
+    event_name: trigger     # all triggers share one label (no condition code on the line)
+    code: 1
   stim_channel: null        # for source == stim (e.g. "TRIG"); null = MNE auto-detection
   min_duration: 0.002       # for source == stim
   shortest_event: 1
