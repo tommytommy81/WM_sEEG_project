@@ -8,6 +8,9 @@ paths:
   regions_file: demo_data/regions_demo.yaml
   raw_fname: "{raw_root}/sub-{subject}_task-wm_ieeg.edf"
 
+events:
+  source: annotations   # the synthetic data carries annotations, not a marker channel
+
 subjects: ["01", "02", "03", "04", "05", "06"]
 
 stats:

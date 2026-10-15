@@ -376,7 +376,8 @@ class SEEGPreprocessor:
         return annot
 
     def load_saved_bad_segments(self) -> int:
-        annot = io.load_saved_bad_segments(self.cfg, self.subject)
+        annot = io.load_saved_bad_segments(self.cfg, self.subject,
+                                           orig_time=self.raw.annotations.orig_time)
         if annot is None:
             return 0
         self.raw.set_annotations(self.raw.annotations + annot)
